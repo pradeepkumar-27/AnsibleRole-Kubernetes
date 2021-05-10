@@ -1,0 +1,107 @@
+---
+# tasks file for Kubernetes
+- name: Installing Docker
+  yum:
+    name:
+      - docker
+      - iproute-tc
+    state: present
+
+- name: Starting Docker service
+  service:
+    name: docker
+    state:  started
+    enabled: yes
+
+- name: Changing Docker cgroup driver to systemd
+  copy:
+    dest: /etc/docker/daemon.json
+    content: |
+              {
+                "exec-opts": ["native.cgroupdriver=systemd"]
+              }
+  register: cgroupStatus
+
+- name: Restarting docker service
+  service:
+    name: docker
+    state: restarted
+  when: cgroupStatus.changed == true
+
+- name: Configuring yum repo for Kubernetes
+  yum_repository:
+    name: kubernetes
+    description: Kubernetes repo
+    baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-\$basearch
+    enabled: yes
+    gpgcheck: yes
+    repo_gpgcheck: yes
+    gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+
+- name: Installing Kubernetes
+  yum:
+    name:
+      - kubeadm
+      - kubectl
+      - kubelet
+
+- name: Enabling kubelet service
+  service:
+    name: kubelet
+    state: started
+    enabled: yes
+
+- name: Pulling required config images in master
+  shell: "kubeadm config images pull"
+  changed_when: false
+  when: inventory_hostname in groups['Master']
+
+- name: Configuring k8s.conf
+  copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+              net.bridge.bridge-nf-call-ip6tables = 1
+              net.bridge.bridge-nf-call-iptables = 1
+
+- name: Refreshing sysctl
+  shell: "sysctl --sytem"
+  changed_when: false
+
+- name: Starting kubeadm service in master
+  shell: "kubeadm init --pod-network-cidr={{ cidr }} --ignore-preflight-errors=NumCPU --ignore-preflight-errors=Mem"
+  when: inventory_hostname in groups['Master']
+
+- name: Creating .kube directory
+  file:
+    path: $HOME/.kube
+    state: directory
+  when: inventory_hostname in groups['Master']
+
+- name: Copying all configuration files in master
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: $HOME/.kube/config
+    remote_src: yes
+  when: inventory_hostname in groups['Master']
+
+- name: Copying flannel script to master
+  template:
+    dest: /root
+    src: kube-flannel.yml
+  when: inventory_hostname in groups['Master']
+
+- name: Getting token from master
+  shell: "kubeadm token create --print-join-command"
+  when: inventory_hostname in groups['Master']
+  register: token
+
+- set_fact:
+    joiningToken: "{{ hostvars[groups['Master'][0]]['token']['stdout'] }}"
+
+- name: Joining slave servers to master
+  shell: "{{ joiningToken }}"
+  when: inventory_hostname in groups['Slave']
+
+- name: Running Kube Flannel on master
+  shell: "kubectl apply -f /root/kube-flannel.yml"
+  when: inventory_hostname in groups['Master']
